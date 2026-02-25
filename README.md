@@ -47,8 +47,8 @@ Since uv often manages environments in central cache locations on macOS, you can
 
 **Find and remove the largest dead environments in your Home folder**:
 
-`# Sorts by size automatically. Review the list, then run with -delete.
-findvenv -system -age 90 ~ | tail -n 10`
+Sorts by size automatically. Review the list, then run with -delete.
+`findvenv -system -age 90 ~ | tail -n 10`
 
 **Deep scan of a specific dev workspace**:
 
