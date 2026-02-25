@@ -57,6 +57,9 @@ tidyup -system -age 90 -sort size ~
 # Move to Trash instead of permanent delete
 tidyup -delete -trash -system ~
 
+# Non-interactive deletion for CI/automation
+tidyup -delete -confirm -age 90 -system ~
+
 # Log deletions for audit
 tidyup -delete -log cleanup.log -system ~
 ```
@@ -76,6 +79,7 @@ tidyup -delete -log cleanup.log -system ~
 | `-min-size N` | `0` | Only report venvs above N bytes |
 | `-sort F` | `size` | Sort by: `size`, `age`, or `path` |
 | `-trash` | `false` | Move to `~/.Trash` instead of permanent delete (macOS) |
+| `-confirm` | `false` | Skip interactive y/N prompt (for CI/automation) |
 | `-log FILE` | | Write timestamped deletion log to FILE |
 | `-version` | | Print version and exit |
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0
+
+### Added
+- `--confirm` flag to skip interactive y/N prompt for CI/automation
+- Collision-safe `--trash`: appends timestamp suffix when basename already exists in ~/.Trash
+- Graceful `--trash` fallback on non-macOS (warns and uses permanent delete)
+
+### Changed
+- Split main.go into scan.go, delete.go, output.go, and main.go for maintainability
+- Extracted `options` struct to pass configuration cleanly between modules
+- Makefile now builds from package (`.`) instead of single file
+
 ## 0.2.0
 
 ### Added
