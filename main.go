@@ -1,11 +1,12 @@
 // main.go
-// tidyup – lightweight Python virtual environment locator and cleaner.
+// tidyup -- lightweight Python virtual environment locator and cleaner.
 // Optimized for macOS and 'uv' environments with advanced activity detection.
 
 package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -15,27 +16,45 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
+)
+
+// version is set at build time via -ldflags.
+var version = "dev"
+
+// Exit codes for scripting.
+const (
+	exitOK       = 0
+	exitFound    = 1
+	exitError    = 2
 )
 
 // VenvRecord holds metadata about a found environment for evaluation.
 type VenvRecord struct {
-	Path     string
-	Size     int64
-	LastUsed time.Time
-	AgeDays  float64
+	Path     string  `json:"path"`
+	Size     int64   `json:"size_bytes"`
+	SizeHuman string `json:"size_human"`
+	LastUsed string  `json:"last_used"`
+	AgeDays  float64 `json:"age_days"`
+}
+
+// JSONOutput is the top-level structure for --json output.
+type JSONOutput struct {
+	Count      int          `json:"count"`
+	TotalBytes int64        `json:"total_bytes"`
+	TotalHuman string       `json:"total_human"`
+	Records    []VenvRecord `json:"records"`
+	DryRun     bool         `json:"dry_run"`
 }
 
 // getVenvUsage inspects specific venv markers to determine the last time it was actually "used".
-// This is more reliable than directory timestamps on APFS.
-func getVenvUsage(path string) time.Time {
+// Returns the latest mtime found and whether any marker was found at all.
+func getVenvUsage(path string) (time.Time, bool) {
 	binDir := "bin"
 	if runtime.GOOS == "windows" {
 		binDir = "Scripts"
 	}
 
-	// We look for activity in activation scripts and the pyvenv.cfg.
 	targets := []string{
 		filepath.Join(path, binDir, "activate"),
 		filepath.Join(path, "pyvenv.cfg"),
@@ -43,23 +62,30 @@ func getVenvUsage(path string) time.Time {
 	}
 
 	var latest time.Time
+	found := false
 	for _, t := range targets {
 		if info, err := os.Stat(t); err == nil {
-			atime := info.ModTime() // Using ModTime as it's the most consistent across OSes.
-			if atime.After(latest) {
-				latest = atime
+			found = true
+			if mtime := info.ModTime(); mtime.After(latest) {
+				latest = mtime
 			}
 		}
 	}
-	return latest
+
+	// Fall back to the venv directory's own mtime if no markers were readable.
+	if !found {
+		if info, err := os.Stat(path); err == nil {
+			return info.ModTime(), true
+		}
+	}
+
+	return latest, found
 }
 
 // isVenv identifies if a directory is a Python virtual environment via the pyvenv.cfg marker.
 func isVenv(path string) bool {
-	if _, err := os.Stat(filepath.Join(path, "pyvenv.cfg")); err != nil {
-		return false
-	}
-	return true
+	_, err := os.Stat(filepath.Join(path, "pyvenv.cfg"))
+	return err == nil
 }
 
 // dirSize recursively calculates total bytes in a directory.
@@ -90,27 +116,87 @@ func formatBytes(b int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
+// matchesExclude checks if a path matches any of the exclude patterns.
+func matchesExclude(path string, patterns []string) bool {
+	for _, pat := range patterns {
+		if matched, _ := filepath.Match(pat, filepath.Base(path)); matched {
+			return true
+		}
+		if strings.Contains(path, pat) {
+			return true
+		}
+	}
+	return false
+}
+
 func main() {
-	minAge := flag.Int("age", 30, "Min days since last use (default: 30)")
+	os.Exit(run())
+}
+
+func run() int {
+	// Flags.
+	minAge := flag.Int("age", 30, "Min days since last use")
 	maxDepth := flag.Int("depth", 5, "Scan depth for recursion")
-	doDelete := flag.Bool("delete", false, "Actually delete the identified environments")
+	doDelete := flag.Bool("delete", false, "Delete the identified environments")
+	dryRun := flag.Bool("dry-run", false, "Preview what would be deleted (default behavior, useful with -delete to override)")
 	systemScan := flag.Bool("system", false, "Include standard uv cache locations (~/.local/share/uv)")
+	showVersion := flag.Bool("version", false, "Print version and exit")
+	jsonOut := flag.Bool("json", false, "Output results as JSON")
+	verbose := flag.Bool("verbose", false, "Show scan progress on stderr")
+	excludeRaw := flag.String("exclude", "", "Comma-separated path patterns to skip")
+	minSize := flag.Int64("min-size", 0, "Only report venvs above this size in bytes")
+	sortField := flag.String("sort", "size", "Sort by: size, age, path")
+	useTrash := flag.Bool("trash", false, "Move to ~/.Trash instead of permanent delete (macOS)")
+	logFile := flag.String("log", "", "Write deletion log to this file")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "tidyup: Locates and cleans up unused Python environments.\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: tidyup [flags] [paths...]\n\n")
 		flag.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nExample: tidyup -age 60 -system -delete ~\n")
+		fmt.Fprintf(os.Stderr, "\nExamples:\n")
+		fmt.Fprintf(os.Stderr, "  tidyup                          Scan current dir for venvs unused 30+ days\n")
+		fmt.Fprintf(os.Stderr, "  tidyup -system ~                Scan home + uv caches\n")
+		fmt.Fprintf(os.Stderr, "  tidyup -age 60 -delete ~        Delete venvs unused 60+ days\n")
+		fmt.Fprintf(os.Stderr, "  tidyup -delete -dry-run ~       Preview deletions without acting\n")
+		fmt.Fprintf(os.Stderr, "  tidyup -json -system ~          Machine-readable output\n")
+		fmt.Fprintf(os.Stderr, "  tidyup ~/dev ~/projects         Scan multiple directories\n")
+		fmt.Fprintf(os.Stderr, "\nExit codes: 0=nothing found, 1=stale venvs found, 2=error\n")
 	}
 	flag.Parse()
 
-	roots := []string{"."}
-	if flag.NArg() > 0 {
-		roots = []string{flag.Arg(0)}
+	if *showVersion {
+		fmt.Printf("tidyup %s\n", version)
+		return exitOK
 	}
 
-	// Incorporating standard uv locations from the Python project.
+	// Parse exclude patterns.
+	var excludePatterns []string
+	if *excludeRaw != "" {
+		for _, p := range strings.Split(*excludeRaw, ",") {
+			if trimmed := strings.TrimSpace(p); trimmed != "" {
+				excludePatterns = append(excludePatterns, trimmed)
+			}
+		}
+	}
+
+	// If --dry-run is set alongside --delete, it cancels the delete (preview only).
+	if *dryRun {
+		*doDelete = false
+	}
+
+	// Collect root paths -- accept multiple positional args.
+	roots := flag.Args()
+	if len(roots) == 0 {
+		roots = []string{"."}
+	}
+
+	// Include standard uv locations.
 	if *systemScan {
-		home, _ := os.UserHomeDir()
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: could not determine home directory: %v\n", err)
+			return exitError
+		}
 		extra := []string{
 			filepath.Join(home, ".local/share/uv/venvs"),
 			filepath.Join(home, "Library/Caches/uv/venvs"),
@@ -125,17 +211,31 @@ func main() {
 	var records []VenvRecord
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	var scanErrors []string
+	var scanned int64
 
-	fmt.Fprintf(os.Stderr, "Scanning roots: %v\n", roots)
+	if *verbose {
+		fmt.Fprintf(os.Stderr, "Scanning roots: %v\n", roots)
+	}
 
 	for _, root := range roots {
-		absRoot, _ := filepath.Abs(root)
+		absRoot, err := filepath.Abs(root)
+		if err != nil {
+			scanErrors = append(scanErrors, fmt.Sprintf("bad path %q: %v", root, err))
+			continue
+		}
+
+		if _, err := os.Stat(absRoot); err != nil {
+			scanErrors = append(scanErrors, fmt.Sprintf("path not accessible %q: %v", absRoot, err))
+			continue
+		}
+
 		_ = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || !d.IsDir() {
 				return nil
 			}
 
-			// Pruning depth and system noise.
+			// Depth pruning.
 			rel, _ := filepath.Rel(absRoot, path)
 			if rel != "." {
 				depth := strings.Count(filepath.ToSlash(rel), "/") + 1
@@ -144,13 +244,26 @@ func main() {
 				}
 			}
 
+			// Skip system noise.
 			switch d.Name() {
 			case ".git", "node_modules", "Library", ".Trash", "__pycache__":
 				return filepath.SkipDir
 			}
 
+			// Exclude patterns.
+			if matchesExclude(path, excludePatterns) {
+				return filepath.SkipDir
+			}
+
 			if isVenv(path) {
-				lastUsed := getVenvUsage(path)
+				lastUsed, found := getVenvUsage(path)
+				if !found {
+					if *verbose {
+						fmt.Fprintf(os.Stderr, "  skipping (no markers): %s\n", path)
+					}
+					return filepath.SkipDir
+				}
+
 				age := time.Since(lastUsed).Hours() / 24
 
 				if age >= float64(*minAge) {
@@ -158,17 +271,26 @@ func main() {
 					go func(p string, lu time.Time, ad float64) {
 						defer wg.Done()
 						sz := dirSize(p)
+						if sz < *minSize {
+							return
+						}
 						mu.Lock()
 						records = append(records, VenvRecord{
-							Path:     p,
-							Size:     sz,
-							LastUsed: lu,
-							AgeDays:  ad,
+							Path:      p,
+							Size:      sz,
+							SizeHuman: formatBytes(sz),
+							LastUsed:  lu.Format("2006-01-02"),
+							AgeDays:   ad,
 						})
 						mu.Unlock()
+						if *verbose {
+							mu.Lock()
+							scanned++
+							fmt.Fprintf(os.Stderr, "  found %d stale venvs so far...\r", scanned)
+							mu.Unlock()
+						}
 					}(path, lastUsed, age)
 				}
-				// venvs don't usually nest other venvs.
 				return filepath.SkipDir
 			}
 			return nil
@@ -177,45 +299,126 @@ func main() {
 
 	wg.Wait()
 
-	// Sort largest folders to the top.
-	sort.Slice(records, func(i, j int) bool {
-		return records[i].Size > records[j].Size
-	})
+	// Report any scan errors.
+	for _, e := range scanErrors {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", e)
+	}
+
+	// Sort results.
+	switch *sortField {
+	case "age":
+		sort.Slice(records, func(i, j int) bool {
+			return records[i].AgeDays > records[j].AgeDays
+		})
+	case "path":
+		sort.Slice(records, func(i, j int) bool {
+			return records[i].Path < records[j].Path
+		})
+	default: // "size"
+		sort.Slice(records, func(i, j int) bool {
+			return records[i].Size > records[j].Size
+		})
+	}
 
 	var totalSize int64
 	for _, r := range records {
-		fmt.Printf("%-10s %-4.0fd ago  %s\n", formatBytes(r.Size), r.AgeDays, r.Path)
 		totalSize += r.Size
+	}
+
+	// JSON output mode.
+	if *jsonOut {
+		out := JSONOutput{
+			Count:      len(records),
+			TotalBytes: totalSize,
+			TotalHuman: formatBytes(totalSize),
+			Records:    records,
+			DryRun:     !*doDelete,
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(out); err != nil {
+			fmt.Fprintf(os.Stderr, "Error encoding JSON: %v\n", err)
+			return exitError
+		}
+		if len(records) == 0 {
+			return exitOK
+		}
+		return exitFound
+	}
+
+	// Text output.
+	for _, r := range records {
+		fmt.Printf("%-10s %-4.0fd ago  %s\n", r.SizeHuman, r.AgeDays, r.Path)
 	}
 
 	if len(records) == 0 {
 		fmt.Println("No unused environments found.")
-		return
+		return exitOK
 	}
 
 	fmt.Printf("\nFound %d environments totaling %s\n", len(records), formatBytes(totalSize))
 
-	// Interactive safe-delete logic.
+	// Deletion logic.
 	if *doDelete {
-		fmt.Printf("\nWARNING: You are about to PERMANENTLY DELETE these folders. Continue? [y/N]: ")
+		// Open log file if requested.
+		var logWriter *os.File
+		if *logFile != "" {
+			var err error
+			logWriter, err = os.OpenFile(*logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error opening log file: %v\n", err)
+				return exitError
+			}
+			defer logWriter.Close()
+			fmt.Fprintf(logWriter, "# tidyup deletion log -- %s\n", time.Now().Format(time.RFC3339))
+		}
+
+		if *useTrash && runtime.GOOS == "darwin" {
+			fmt.Printf("\nWARNING: You are about to move %d folders to Trash. Continue? [y/N]: ", len(records))
+		} else {
+			fmt.Printf("\nWARNING: You are about to PERMANENTLY DELETE %d folders. Continue? [y/N]: ", len(records))
+		}
+
 		reader := bufio.NewReader(os.Stdin)
 		response, _ := reader.ReadString('\n')
-		if strings.TrimSpace(strings.ToLower(response)) == "y" {
-			var deletedCount int32
-			for _, r := range records {
-				err := os.RemoveAll(r.Path)
-				if err == nil {
-					fmt.Printf("Deleted: %s\n", r.Path)
-					atomic.AddInt32(&deletedCount, 1)
-				} else {
-					fmt.Printf("Error deleting %s: %v\n", r.Path, err)
+		if strings.TrimSpace(strings.ToLower(response)) != "y" {
+			fmt.Println("Cleanup cancelled.")
+			return exitFound
+		}
+
+		var deletedCount int
+		for _, r := range records {
+			var err error
+			if *useTrash && runtime.GOOS == "darwin" {
+				trashPath := filepath.Join(os.Getenv("HOME"), ".Trash", filepath.Base(r.Path))
+				err = os.Rename(r.Path, trashPath)
+			} else {
+				err = os.RemoveAll(r.Path)
+			}
+
+			if err == nil {
+				action := "Deleted"
+				if *useTrash && runtime.GOOS == "darwin" {
+					action = "Trashed"
+				}
+				fmt.Printf("%s: %s\n", action, r.Path)
+				deletedCount++
+				if logWriter != nil {
+					fmt.Fprintf(logWriter, "%s %s %s %s\n",
+						time.Now().Format(time.RFC3339), action, formatBytes(r.Size), r.Path)
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "Error removing %s: %v\n", r.Path, err)
+				if logWriter != nil {
+					fmt.Fprintf(logWriter, "%s ERROR %s: %v\n",
+						time.Now().Format(time.RFC3339), r.Path, err)
 				}
 			}
-			fmt.Printf("\nCleanup complete. Removed %d environments.\n", deletedCount)
-		} else {
-			fmt.Println("Cleanup cancelled.")
 		}
+		fmt.Printf("\nCleanup complete. Removed %d environments.\n", deletedCount)
 	} else {
 		fmt.Println("\nRun with '-delete' to reclaim this space.")
 	}
+
+	return exitFound
 }

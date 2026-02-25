@@ -1,73 +1,99 @@
-# **tidyup**
+# tidyup
 
-tidyup is a lightweight Go-based CLI tool to identify and clean up unused Python virtual environments. It is specifically optimized for macOS and users of the uv package manager who find their systems cluttered with transient environments.
+Lightweight Go CLI to identify and clean up unused Python virtual environments. Optimized for macOS and `uv` users who accumulate stale environments.
 
-## **Features**
+## Features
 
-* **Advanced Activity Detection**: Ported from an older project I did in Python, [`uv-tidy`](https://github.com/fblissjr/uv-tidy/), it inspects pyvenv.cfg and activation scripts for actual usage timestamps, rather than relying on unreliable directory access times.  
-* **Concurrent Scanning**: Uses Go goroutines to calculate directory sizes in parallel, significantly speeding up scans of large SSDs.  
-* **System-Wide Awareness**: With the --system flag, it automatically includes standard uv cache locations (`~/Library/Caches/uv/venvs`, etc.).  
-* **Safe Deletion**: Features an interactive confirmation prompt and summarizes exactly how much space will be reclaimed before touching any files.  
-* **Customizable Depth**: Limit recursion to avoid scanning deep into system or project folders.
+- **Advanced Activity Detection** -- Inspects `pyvenv.cfg` and activation scripts for actual usage timestamps rather than unreliable directory access times. Falls back to directory mtime when markers are missing.
+- **Concurrent Scanning** -- Uses goroutines to calculate directory sizes in parallel.
+- **System-Wide Awareness** -- With `--system`, automatically includes standard uv cache locations (`~/Library/Caches/uv/venvs`, etc.).
+- **Safe Deletion** -- Interactive confirmation prompt, optional `--dry-run`, optional `--trash` (macOS) to move to Trash instead of permanent delete.
+- **Machine-Readable Output** -- `--json` flag for scripting and piping to `jq`.
+- **Auditable** -- `--log` writes a timestamped deletion log.
 
-## **Installation**
+## Installation
 
-1. **Clone the repository**:  
-   `git clone [https://github.com/fblissjr/tidyup.git](https://github.com/fblissjr/tidyup.git)`
-   `cd tidyup`
+```bash
+git clone https://github.com/fblissjr/tidyup.git
+cd tidyup
+make install
+```
 
-2. **Build and install**:  
-   `make install`
+This builds the binary and moves it to `/usr/local/bin` (requires sudo).
 
-   *Note: This moves the binary to /usr/local/bin, requiring sudo privileges.*
+## Usage
 
-## **Usage**
+### Quick Start
 
-### **Common Commands**
+```bash
+# Scan current directory for venvs unused 30+ days
+tidyup
 
-**Scan current directory for venvs unused for 30+ days**:
+# Scan home directory including uv caches
+tidyup -system ~
 
-`tidyup`
+# Scan multiple directories
+tidyup ~/dev ~/projects ~/experiments
 
-**Scan entire home directory including uv caches, limited to 5 levels deep**:
+# Delete venvs unused 60+ days
+tidyup -age 60 -delete ~
 
-`tidyup -system -depth 5 ~`
+# Preview what -delete would do without acting
+tidyup -delete -dry-run ~
 
-**Identify environments over 60 days old and delete them**:
+# JSON output for scripting
+tidyup -json -system ~ | jq '.records[] | .path'
+```
 
-`tidyup -age 60 -delete ~`
+### macOS + uv Examples
 
-### **macOS & uv Specific Examples**
+```bash
+# Preview all global uv environments unused for 2 months
+tidyup -system -age 60 ~
 
-Since uv often manages environments in central cache locations on macOS, you can target those specifically to reclaim massive amounts of space:
+# Find the largest stale environments
+tidyup -system -age 90 -sort size ~
 
-**Preview all global uv environments unused for 2 months**:
+# Move to Trash instead of permanent delete
+tidyup -delete -trash -system ~
 
-`tidyup -system -age 60 ~/Library/Caches/uv/venvs`
+# Log deletions for audit
+tidyup -delete -log cleanup.log -system ~
+```
 
-**Find and remove the largest dead environments in your Home folder**:
+### Flags
 
-Sorts by size automatically. Review the list, then run with -delete.
-`findvenv -system -age 90 ~ | tail -n 10`
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-age N` | `30` | Minimum days since last use |
+| `-depth N` | `5` | Maximum scan recursion depth |
+| `-delete` | `false` | Delete identified environments |
+| `-dry-run` | `false` | Preview deletions without acting (overrides `-delete`) |
+| `-system` | `false` | Include standard uv cache locations |
+| `-json` | `false` | Machine-readable JSON output |
+| `-verbose` | `false` | Show scan progress on stderr |
+| `-exclude P` | | Comma-separated path patterns to skip |
+| `-min-size N` | `0` | Only report venvs above N bytes |
+| `-sort F` | `size` | Sort by: `size`, `age`, or `path` |
+| `-trash` | `false` | Move to `~/.Trash` instead of permanent delete (macOS) |
+| `-log FILE` | | Write timestamped deletion log to FILE |
+| `-version` | | Print version and exit |
 
-**Deep scan of a specific dev workspace**:
+### Exit Codes
 
-`findvenv -depth 10 ~/dev/projects`
+| Code | Meaning |
+|------|---------|
+| `0` | No stale environments found |
+| `1` | Stale environments found (or deleted) |
+| `2` | Error |
 
-### **Safe Deletion**
+## Technical Notes
 
-When using the `-delete` flag, tidyup will:
+- **Pruning**: Aggressively skips `.git`, `node_modules`, `Library`, `.Trash`, and `__pycache__` directories for performance.
+- **Detection**: Uses `pyvenv.cfg` as the venv marker. Falls back to directory mtime if activation scripts are missing.
+- **Permissions**: Ensure you have proper permissions for scanned directories.
+- **Symlinks**: `filepath.WalkDir` does not follow symlinks.
 
-1. List all candidates for removal with their size and age.  
-2. Provide a total count and total reclaimed space estimate.  
-3. Prompt for an explicit y/N confirmation before executing os.RemoveAll.
+## License
 
-## **Technical Notes**
-
-* **Permissions**: Ensure you have proper permissions for the directories you are scanning.  
-* **Pruning**: To maintain performance, the tool aggressively prunes `.git`, `node_modules`, and macOS `Library` folders from its search path.  
-* **uv Optimization**: Standard `uv` layouts are detected using the `pyvenv.cfg` marker which contains specific metadata.
-
-## **License**
-
-This project is licensed under the MIT License -- see the LICENSE file for details.
+MIT -- see LICENSE file.
