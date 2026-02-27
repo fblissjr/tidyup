@@ -7,8 +7,9 @@ import (
 	"sort"
 )
 
-// VenvRecord holds metadata about a found environment for evaluation.
-type VenvRecord struct {
+// Record holds metadata about a found item for evaluation.
+type Record struct {
+	Type      string  `json:"type"`
 	Path      string  `json:"path"`
 	Size      int64   `json:"size_bytes"`
 	SizeHuman string  `json:"size_human"`
@@ -18,11 +19,11 @@ type VenvRecord struct {
 
 // JSONOutput is the top-level structure for --json output.
 type JSONOutput struct {
-	Count      int          `json:"count"`
-	TotalBytes int64        `json:"total_bytes"`
-	TotalHuman string       `json:"total_human"`
-	Records    []VenvRecord `json:"records"`
-	DryRun     bool         `json:"dry_run"`
+	Count      int      `json:"count"`
+	TotalBytes int64    `json:"total_bytes"`
+	TotalHuman string   `json:"total_human"`
+	Records    []Record `json:"records"`
+	DryRun     bool     `json:"dry_run"`
 }
 
 // formatBytes provides human-readable output (MB, GB, etc.)
@@ -40,7 +41,7 @@ func formatBytes(b int64) string {
 }
 
 // sortRecords sorts records by the given field.
-func sortRecords(records []VenvRecord, field string) {
+func sortRecords(records []Record, field string) {
 	switch field {
 	case "age":
 		sort.Slice(records, func(i, j int) bool {
@@ -58,7 +59,7 @@ func sortRecords(records []VenvRecord, field string) {
 }
 
 // totalSize sums the size of all records.
-func totalSize(records []VenvRecord) int64 {
+func totalSize(records []Record) int64 {
 	var total int64
 	for _, r := range records {
 		total += r.Size
@@ -67,7 +68,7 @@ func totalSize(records []VenvRecord) int64 {
 }
 
 // printJSON writes machine-readable JSON output.
-func printJSON(records []VenvRecord, total int64, dryRun bool) int {
+func printJSON(records []Record, total int64, dryRun bool) int {
 	out := JSONOutput{
 		Count:      len(records),
 		TotalBytes: total,
@@ -88,13 +89,13 @@ func printJSON(records []VenvRecord, total int64, dryRun bool) int {
 }
 
 // printText writes human-readable text output.
-func printText(records []VenvRecord, total int64) {
+func printText(records []Record, total int64) {
 	for _, r := range records {
-		fmt.Printf("%-10s %-4.0fd ago  %s\n", r.SizeHuman, r.AgeDays, r.Path)
+		fmt.Printf("%-10s %-4.0fd ago  %-12s  %s\n", r.SizeHuman, r.AgeDays, "["+r.Type+"]", r.Path)
 	}
 	if len(records) > 0 {
-		fmt.Printf("\nFound %d environments totaling %s\n", len(records), formatBytes(total))
+		fmt.Printf("\nFound %d items totaling %s\n", len(records), formatBytes(total))
 	} else {
-		fmt.Println("No unused environments found.")
+		fmt.Println("No unused items found.")
 	}
 }

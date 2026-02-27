@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.0
+
+### Added
+- Multi-type scanning: node_modules, __pycache__, .pytest_cache, .mypy_cache, .ruff_cache, dist/, build/
+- `-type` flag for comma-separated type selection
+- `-all` flag to scan for all supported types
+- Interactive selection: numbered list with range/individual picking when deleting
+- Active venv protection: refuses to delete $VIRTUAL_ENV
+- Path safety guards: refuses to delete system-critical paths
+- Improved venv validation: requires bin/ or Scripts/ in addition to pyvenv.cfg
+- Improved usage heuristics: checks site-packages mtimes for better staleness detection
+- node_modules usage heuristic: checks .package-lock.json and parent lockfiles
+- `safety.go` module with safety validation functions
+
+### Changed
+- VenvRecord renamed to Record with new Type field in JSON output
+- Output text says "items" instead of "environments"
+- `-system` flag warns when used without venv type
+- Confirmation prompt replaced with interactive numbered selection
+- `--confirm` skips interactive selection (automation backward compat)
+
+### Fixed
+- False positive: venvs created long ago but actively used no longer misidentified as stale
+- False positive: directories with only pyvenv.cfg but no bin/ no longer treated as venvs
+
 ## 0.3.0
 
 ### Added
