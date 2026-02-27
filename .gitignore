@@ -27,6 +27,9 @@ go.work.sum
 # env file
 .env
 
+# Internal documentation (session logs, notes)
+internal/
+
 # Editor/IDE
 # .idea/
 # .vscode/

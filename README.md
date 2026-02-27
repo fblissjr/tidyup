@@ -1,5 +1,7 @@
 # tidyup
 
+> Last updated: 2026-02-27
+
 Lightweight Go CLI to identify and clean up unused development artifacts: Python virtual environments, node_modules, caches, and build outputs. Optimized for macOS and `uv` users.
 
 ## Features
